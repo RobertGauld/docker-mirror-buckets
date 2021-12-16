@@ -1,0 +1,5 @@
+docker.env
+app/.env
+data
+rclone.conf
+config.json

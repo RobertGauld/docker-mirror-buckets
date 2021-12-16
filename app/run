@@ -1,0 +1,84 @@
+#!/usr/bin/env ruby
+
+require 'dotenv'
+require 'fileutils'
+require 'json'
+require 'logger'
+require 'time'
+
+
+# Load configuration
+Dotenv.load # defaults to '.env'
+# TODO: Enable require_keys check when next version of gem is released
+#Dotenv.require_keys('HEROKU_AUTH_TOKEN')
+DESTINATION = File.expand_path(ENV.fetch('DESTINATION', '/media/destination'))
+CONFIG = JSON.parse(File.read(File.expand_path(ENV.fetch('CONFIG', 'config.json'))))
+             .map { _1.transform_keys(&:to_sym) }
+             .freeze
+
+# Configure the app wide logger
+$logger = Logger.new(STDOUT)
+$logger.formatter = proc do |severity, datetime, progname, message|
+  if Thread.current.thread_variable_get(:logger_label)
+    message = "#{Thread.current.thread_variable_get(:logger_label)} - #{message}"
+  end
+  "#{datetime} #{severity} #{progname}: #{message}\n"
+end
+$logger.level = ENV['LOG_LEVEL']&.to_i || Logger::INFO
+
+
+$logger.info "Loaded configuration (#{CONFIG.count})"
+$logger.debug "Configuration: #{CONFIG.inspect}"
+$logger.debug "Saving to: #{DESTINATION}"
+$logger.debug "rclone: #{`which rclone`.chomp} | #{`rclone --version`.lines.first.chomp}"
+
+CONFIG.each do |config|
+  $logger.info "Doing #{config[:backend]}/#{config[:bucket]}"
+
+  dir_root = File.join(
+    DESTINATION,
+    config.fetch(:backend),
+    config.fetch(:bucket)
+  )
+  dir_name = File.join(dir_root, Time.now.utc.strftime('%F_%H:%M'))
+  existing = File.exist?(dir_root) && Dir.glob(File.join(dir_root, '????-??-??_??:??')).map { File.basename(_1) }.max
+
+  if existing
+    # Existing backups, prepare the new one
+    $logger.debug "cp -a \"#{dir_root}/#{existing}\" \"#{dir_name}\""
+    system "cp -a \"#{dir_root}/#{existing}\" \"#{dir_name}\""
+  end
+
+  $logger.debug "rclone --delete-before sync #{config.fetch(:backend)}:#{config.fetch(:bucket)} \"#{dir_name}\""
+  system "rclone --delete-before sync #{config.fetch(:backend)}:#{config.fetch(:bucket)} \"#{dir_name}\""
+
+  if existing
+    existing = File.join(dir_root, existing)
+    # There was an existing backup so hard link relevant files
+    Dir.glob("#{existing}/**/*")
+       .map { file = _1[existing.length+1..-1]; ["#{existing}/#{file}", "#{dir_name}/#{file}"] }
+       .select { File.size(_1[0]) == File.size(_1[1]) && File.mtime(_1[0]) == File.mtime(_1[1]) }
+       .select { FileUtils.compare_file(*_1) }
+       .each do |(existing_file, new_file)|
+          $logger.debug "rm \"#{new_file}\" && cp -al \"#{existing_file}\" \"#{new_file}\""
+          system "rm \"#{new_file}\" && cp -al \"#{existing_file}\" \"#{new_file}\""
+       end
+  end
+end
+
+# Purge old backups
+max_age = Time.now - (7 * 24 * 60 * 30)
+to_delete = Dir.glob("#{DESTINATION}/*/*/????-??-??_??:??")
+               .select { Time.strptime(File.basename(_1), '%F_%H:%M') < max_age }
+if to_delete.any?
+  $logger.debug "rm -rf #{to_delete.map(&:inspect).join(' ')}"
+  system "rm -rf #{to_delete.map(&:inspect).join(' ')}"
+end
+
+# Remove empty directories
+to_delete = (Dir.glob("#{DESTINATION}/*/*") + Dir.glob("#{DESTINATION}/*")).each do |dir|
+  next unless Dir.empty? dir
+
+  $logger.debug "rmdir \"#{dir}\""
+  system "rmdir \"#{dir}\""
+end

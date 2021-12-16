@@ -1,0 +1,12 @@
+#!/bin/bash
+
+# Fail and exit immediately if any command doesn't succeed (e)
+# or if any unbound variables lurk within (u)
+set -eu
+
+# Build the new image
+docker build \
+  --force-rm \
+  --tag robertgauld/mirror-buckets \
+  --file Dockerfile \
+  $@ ./
