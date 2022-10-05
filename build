@@ -4,9 +4,13 @@
 # or if any unbound variables lurk within (u)
 set -eu
 
+tag='mirror-buckets'
+
 # Build the new image
 docker build \
   --force-rm \
-  --tag robertgauld/mirror-buckets \
+  --tag $tag \
   --file Dockerfile \
-  $@ ./
+ ./
+
+docker save --output ../"$tag"_image.tar "$tag"
